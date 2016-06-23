@@ -1,12 +1,11 @@
-#include <math.h>
-#include <application.h>
+#include "math.h"
+#include "application.h"
+#include "elapsedMillis.h"
+#include "blynk.h"
 #include "blynkAuthToken.h"
 
-#include "elapsedMillis/elapsedMillis.h"
-#include "blynk/blynk.h"
-
 #define APP_NAME "FridgeTemperatureMonitor"
-const String VERSION = "Version 0.01";
+const String VERSION = "Version 0.02";
 
 /*******************************************************************************
   the sensor used: 10K Precision Epoxy Thermistor - 3950 NTC
@@ -61,6 +60,37 @@ int sensorToRead = 1;
 elapsedMillis sensorSampleInterval;
 
 /*******************************************************************************
+ alarms variables for each sensor
+*******************************************************************************/
+bool alarmSensor1 = false;
+bool alarmSensor2 = false;
+bool alarmSensor3 = false;
+bool alarmSensor4 = false;
+
+elapsedMillis alarmSensor1_timer;
+elapsedMillis alarmSensor2_timer;
+elapsedMillis alarmSensor3_timer;
+elapsedMillis alarmSensor4_timer;
+
+int alarmSensor1_index = 0;
+int alarmSensor2_index = 0;
+int alarmSensor3_index = 0;
+int alarmSensor4_index = 0;
+
+unsigned long alarmSensor1_next_alarm = 0;
+unsigned long alarmSensor2_next_alarm = 0;
+unsigned long alarmSensor3_next_alarm = 0;
+unsigned long alarmSensor4_next_alarm = 0;
+
+/*******************************************************************************
+ thresholds for each sensor
+*******************************************************************************/
+float thresholdSensor1 = 50;
+float thresholdSensor2 = 50;
+float thresholdSensor3 = 50;
+float thresholdSensor4 = 50;
+
+/*******************************************************************************
  Other variables
 *******************************************************************************/
 //this variable is used for publishing a message that will be detected by a
@@ -90,6 +120,21 @@ char auth[] = BLYNK_AUTH_TOKEN;
 #define BLYNK_DISPLAY_SENSOR2 V2
 #define BLYNK_DISPLAY_SENSOR3 V3
 #define BLYNK_DISPLAY_SENSOR4 V4
+#define BLYNK_DISPLAY_THRESHOLD1 V11
+#define BLYNK_DISPLAY_THRESHOLD2 V12
+#define BLYNK_DISPLAY_THRESHOLD3 V13
+#define BLYNK_DISPLAY_THRESHOLD4 V14
+
+/*******************************************************************************
+ here we define the frequency of the alarms sent to the user
+*******************************************************************************/
+#define FIRST_ALARM 10000 //10 seconds
+#define SECOND_ALARM 60000 //1 minute
+#define THIRD_ALARM 300000 //5 minutes
+#define FOURTH_ALARM 900000 //15 minutes
+#define FIFTH_ALARM 3600000 //1 hour
+#define SIXTH_ALARM 14400000 //4 hours - and every 4 hours ever after, until the situation is rectified (ie no more water is detected)
+int alarms_array[6]={FIRST_ALARM, SECOND_ALARM, THIRD_ALARM, FOURTH_ALARM, FIFTH_ALARM, SIXTH_ALARM};
 
 /*******************************************************************************
  * Function Name  : setup
@@ -146,8 +191,14 @@ void loop() {
     //read the sensor
     float sensorReading = readSensor(sensorToRead);
 
-    //publish and expose in the Particle Cloud the reading of the sensor
+    //publish and expose in the Particle Cloud and blynk server the reading of the sensor
     publishSensorReading(sensorToRead, sensorReading);
+
+    //verify the reading has not exceeded the threshold
+    if ( thresholdExceeded(sensorToRead, sensorReading) ){
+      setAlarmForSensor(sensorToRead);
+      sendAlarmToUser(sensorToRead);
+    }
 
     //increment the sensor to read
     sensorToRead = sensorToRead + 1;
@@ -216,7 +267,7 @@ float readSensor( int sensorIndex )
 /*******************************************************************************
  * Function Name  : publishSensorReading
  * Description    : the temperature passed as parameter gets stored in an internal variable
-                    and then published to the Particle Cloud
+                    and then published to the Particle Cloud and the blynk server
  * Return         : 0
  *******************************************************************************/
 int publishSensorReading( int sensorIndex, float temperature ) {
@@ -254,8 +305,27 @@ int publishSensorReading( int sensorIndex, float temperature ) {
       break;
   }
 
-  //publish readings in the console logs of the dashboard at https://dashboard.particle.io/user/logs
+  //publish reading in the console logs of the dashboard at https://dashboard.particle.io/user/logs
   Particle.publish(APP_NAME, tempToBePublished + getTemperatureUnit(), 60, PRIVATE);
+
+  //publish reading to the blynk server so the History Graph gets updated even when the blynk app is not on
+  if (USE_BLYNK == "yes") {
+    switch (sensorIndex)
+    {
+      case 1:
+        BLYNK_READ(BLYNK_DISPLAY_SENSOR1);
+        break;
+      case 2:
+        BLYNK_READ(BLYNK_DISPLAY_SENSOR2);
+        break;
+      case 3:
+        BLYNK_READ(BLYNK_DISPLAY_SENSOR3);
+        break;
+      case 4:
+        BLYNK_READ(BLYNK_DISPLAY_SENSOR4);
+        break;
+    }
+  }
 
   return 0;
 }
@@ -299,6 +369,98 @@ String getTemperatureUnit() {
   }
 }
 
+/*******************************************************************************
+ * Function Name  : thresholdExceeded
+ * Description    : this function verifies that the temperature passed as parameter
+                    does not exceed the threshold assigned for the sensor
+ * Return         : false if threshold has not been exceeded
+                    true if threshold has been exceeded
+ *******************************************************************************/
+bool thresholdExceeded( int sensorIndex, float temperature ) {
+
+  //a temporary, local variable that will store the threshold for the selected sensor
+  float thresholdForSensor;
+
+  //store readings into exposed variables in the Particle Cloud
+  switch (sensorIndex)
+  {
+    case 1:
+      thresholdForSensor = thresholdSensor1;
+      break;
+    case 2:
+      thresholdForSensor = thresholdSensor2;
+      break;
+    case 3:
+      thresholdForSensor = thresholdSensor3;
+      break;
+    case 4:
+      thresholdForSensor = thresholdSensor4;
+      break;
+  }
+
+  if ( thresholdForSensor > temperature ) {
+    return true;
+  }
+
+  return false;
+
+}
+
+/*******************************************************************************
+ * Function Name  : setAlarmForSensor
+ * Description    : this function sets the alarm for a sensor
+ * Return         : nothing
+ *******************************************************************************/
+void setAlarmForSensor( int sensorIndex ) {
+
+  //if the alarm is already set for the sensor, no need to do anything, since a notification is being fired
+  if (alarmSensor1){
+    return;
+  }
+
+  alarmSensor1 = true;
+
+  //reset alarm timer
+  //TODO: add this var on top alarm_timer = 0;
+  alarmSensor1_timer = 0;
+
+  //set next alarm
+  //TODO: alarm_index = 0;
+  alarmSensor1_index = 0;
+  //TODO: next_alarm = alarms_array[0];
+  alarmSensor1_next_alarm = alarms_array[0];
+
+  return;
+
+}
+
+/*******************************************************************************
+ * Function Name  : sendAlarmToUser
+ * Description    : will fire notifications to the user at scheduled intervals
+ * Return         : nothing
+ *******************************************************************************/
+void sendAlarmToUser( int sensorIndex ) {
+
+    //is time up for sending the next alarm to the user?
+    if (alarmSensor1_timer < alarmSensor1_next_alarm) {
+        return;
+    }
+
+    //time is up, so reset timer
+    alarmSensor1_timer = 0;
+
+    //set next alarm or just keep current one if there are no more alarms to set
+    if (alarmSensor1_index < arraySize(alarms_array)-1) {
+        alarmSensor1_index = alarmSensor1_index + 1;
+        alarmSensor1_next_alarm = alarms_array[alarmSensor1_index];
+    }
+
+    //publish readings in the console logs of the dashboard at https://dashboard.particle.io/user/logs
+    Particle.publish(APP_NAME, "Threshold exceeded for sensor " + String(sensorIndex), 60, PRIVATE);
+
+   return;
+}
+
 /*******************************************************************************/
 /*******************************************************************************/
 /*******************          BLYNK FUNCTIONS         **************************/
@@ -323,10 +485,26 @@ BLYNK_READ(BLYNK_DISPLAY_SENSOR3) {
 BLYNK_READ(BLYNK_DISPLAY_SENSOR4) {
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR4, sensor4);
 }
+BLYNK_READ(BLYNK_DISPLAY_THRESHOLD1) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD1, thresholdSensor1);
+}
+BLYNK_READ(BLYNK_DISPLAY_THRESHOLD2) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD2, thresholdSensor2);
+}
+BLYNK_READ(BLYNK_DISPLAY_THRESHOLD3) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD3, thresholdSensor3);
+}
+BLYNK_READ(BLYNK_DISPLAY_THRESHOLD4) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD4, thresholdSensor4);
+}
 
 BLYNK_CONNECTED() {
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR1);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR2);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR3);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR4);
+  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD1);
+  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD2);
+  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD3);
+  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD4);
 }
