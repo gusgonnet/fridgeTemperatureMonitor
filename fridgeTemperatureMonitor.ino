@@ -16,7 +16,7 @@
 #include "blynk.h"
 
 #define APP_NAME "TemperatureMonitor"
-const String VERSION = "Version 0.03e";
+const String VERSION = "Version 0.04";
 
 /*******************************************************************************
  * changes in version 0.01:
@@ -28,6 +28,10 @@ const String VERSION = "Version 0.03e";
       * refactoring variables into arrays to simplify code
       * renaming the app to TemperatureMonitor (it's a bit more generic)
       * if thresholds are set to 0 that means they are deactivated
+      * added an alarm led in the blynk app
+ * changes in version 0.04:
+      * alarms get reset when temperature is below threshold
+      * added new version of the blynk app
 
 TODO:
   * set thresholds from the blynk app
@@ -67,25 +71,13 @@ const int INPUT_SENSOR[8] = { A0, A1, A2, A3, A4, A5, A6, A7 };
 /*******************************************************************************
  alarms variables for each sensor
 *******************************************************************************/
-bool alarmSensor1 = false;
-bool alarmSensor2 = false;
-bool alarmSensor3 = false;
-bool alarmSensor4 = false;
+bool alarmSensor[8] = { false, false, false, false, false, false, false, false };
 
-elapsedMillis alarmSensor1_timer;
-elapsedMillis alarmSensor2_timer;
-elapsedMillis alarmSensor3_timer;
-elapsedMillis alarmSensor4_timer;
+elapsedMillis alarmSensor_timer[8];
 
-int alarmSensor1_index = 0;
-int alarmSensor2_index = 0;
-int alarmSensor3_index = 0;
-int alarmSensor4_index = 0;
+int alarmSensor_index[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
-unsigned long alarmSensor1_next_alarm = 0;
-unsigned long alarmSensor2_next_alarm = 0;
-unsigned long alarmSensor3_next_alarm = 0;
-unsigned long alarmSensor4_next_alarm = 0;
+unsigned long alarmSensor_next_alarm[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 /*******************************************************************************
  thresholds for each sensor
@@ -139,12 +131,12 @@ char auth[] = BLYNK_AUTH_TOKEN;
 #define BLYNK_DISPLAY_SENSOR1 V1
 #define BLYNK_DISPLAY_SENSOR2 V2
 #define BLYNK_DISPLAY_SENSOR3 V3
-#define BLYNK_DISPLAY_THRESHOLD0 V10
-#define BLYNK_DISPLAY_THRESHOLD1 V11
-#define BLYNK_DISPLAY_THRESHOLD2 V12
-#define BLYNK_DISPLAY_THRESHOLD3 V13
+#define BLYNK_DISPLAY_MAX_THRESHOLD0 V10
+#define BLYNK_DISPLAY_MAX_THRESHOLD1 V11
+#define BLYNK_DISPLAY_MAX_THRESHOLD2 V12
+#define BLYNK_DISPLAY_MAX_THRESHOLD3 V13
 #define BLYNK_DISPLAY_SENSORS { V0, V1, V2, V3, V4, V5, V6, V7 }
-#define BLYNK_DISPLAY_THRESHOLDS { V10, V11, V12, V13, V14, V15, V16, V17 }
+#define BLYNK_DISPLAY_MAX_THRESHOLDS { V10, V11, V12, V13, V14, V15, V16, V17 }
 #define BLYNK_LED_ALARM_SENSOR0 V20
 #define BLYNK_LED_ALARM_SENSOR1 V21
 #define BLYNK_LED_ALARM_SENSOR2 V22
@@ -236,6 +228,8 @@ void loop() {
     if ( thresholdExceeded(sensorToRead, sensorReading) ){
       setAlarmForSensor(sensorToRead);
       sendAlarmToUser(sensorToRead);
+    } else {
+      resetAlarmForSensor(sensorToRead);
     }
 
     //increment the sensor to read
@@ -245,7 +239,7 @@ void loop() {
     }
 
     if (USE_BLYNK == "yes") {
-      BLYNK_setAlarmLed0(alarmSensor1);
+      BLYNK_setAlarmLed0(alarmSensor[0]);
     }
 
     //debug
@@ -418,26 +412,36 @@ bool thresholdExceeded( int sensorIndex, float temperature ) {
 void setAlarmForSensor( int sensorIndex ) {
 
   //if the alarm is already set for the sensor, no need to do anything, since a notification is being fired
-  if (alarmSensor1){
+  if (alarmSensor[sensorIndex]){
     return;
   }
 
-  alarmSensor1 = true;
+  alarmSensor[sensorIndex] = true;
 
   //reset alarm timer
   //TODO: add this var on top alarm_timer = 0;
-  alarmSensor1_timer = 0;
+  alarmSensor_timer[sensorIndex] = 0;
 
   //set next alarm
   //TODO: alarm_index = 0;
-  alarmSensor1_index = 0;
+  alarmSensor_index[sensorIndex] = 0;
   //TODO: next_alarm = alarms_array[0];
-  alarmSensor1_next_alarm = alarms_array[0];
+  alarmSensor_next_alarm[sensorIndex] = alarms_array[0];
 
   return;
 
 }
 
+/*******************************************************************************
+ * Function Name  : resetAlarmForSensor
+ * Description    : this function resets the alarm for a sensor
+ * Return         : nothing
+ *******************************************************************************/
+void resetAlarmForSensor( int sensorIndex ) {
+
+  alarmSensor[sensorIndex] = false;
+
+}
 /*******************************************************************************
  * Function Name  : sendAlarmToUser
  * Description    : will fire notifications to the user at scheduled intervals
@@ -446,17 +450,17 @@ void setAlarmForSensor( int sensorIndex ) {
 void sendAlarmToUser( int sensorIndex ) {
 
     //is time up for sending the next alarm to the user?
-    if (alarmSensor1_timer < alarmSensor1_next_alarm) {
+    if (alarmSensor_timer[sensorIndex] < alarmSensor_next_alarm[sensorIndex]) {
         return;
     }
 
     //time is up, so reset timer
-    alarmSensor1_timer = 0;
+    alarmSensor_timer[sensorIndex] = 0;
 
     //set next alarm or just keep current one if there are no more alarms to set
-    if (alarmSensor1_index < arraySize(alarms_array)-1) {
-        alarmSensor1_index = alarmSensor1_index + 1;
-        alarmSensor1_next_alarm = alarms_array[alarmSensor1_index];
+    if (alarmSensor_index[sensorIndex] < arraySize(alarms_array)-1) {
+        alarmSensor_index[sensorIndex] = alarmSensor_index[sensorIndex] + 1;
+        alarmSensor_next_alarm[sensorIndex] = alarms_array[alarmSensor_index[sensorIndex]];
     }
 
     //publish readings in the console logs of the dashboard at https://dashboard.particle.io/user/logs
@@ -489,29 +493,29 @@ BLYNK_READ(BLYNK_DISPLAY_SENSOR2) {
 BLYNK_READ(BLYNK_DISPLAY_SENSOR3) {
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3, sensorReading[3]);
 }
-BLYNK_READ(BLYNK_DISPLAY_THRESHOLD0) {
-  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD0, sensorThreshold[0]);
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD0) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD0, sensorThreshold[0]);
 }
-BLYNK_READ(BLYNK_DISPLAY_THRESHOLD1) {
-  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD1, sensorThreshold[1]);
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD1) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD1, sensorThreshold[1]);
 }
-BLYNK_READ(BLYNK_DISPLAY_THRESHOLD2) {
-  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD2, sensorThreshold[2]);
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD2) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD2, sensorThreshold[2]);
 }
-BLYNK_READ(BLYNK_DISPLAY_THRESHOLD3) {
-  Blynk.virtualWrite(BLYNK_DISPLAY_THRESHOLD3, sensorThreshold[3]);
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD3) {
+  Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD3, sensorThreshold[3]);
 }
 
 //this is a blynk slider
 // source: http://docs.blynk.cc/#widgets-controllers-slider
-BLYNK_WRITE(BLYNK_DISPLAY_THRESHOLD0) {
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD0) {
    sensorThreshold[0] = float(param.asInt());
 }
 
 //this is a blynk led
 // source: http://docs.blynk.cc/#widgets-displays-led
 BLYNK_READ(BLYNK_LED_ALARM_SENSOR0) {
-  if ( alarmSensor1 ) {
+  if ( alarmSensor[0] ) {
     blynkAlarmSensor0.on();
   } else {
     blynkAlarmSensor0.off();
@@ -533,11 +537,11 @@ BLYNK_CONNECTED() {
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR1);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR2);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR3);
-  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD0);
-  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD1);
-  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD2);
-  Blynk.syncVirtual(BLYNK_DISPLAY_THRESHOLD3);
+  Blynk.syncVirtual(BLYNK_DISPLAY_MAX_THRESHOLD0);
+  Blynk.syncVirtual(BLYNK_DISPLAY_MAX_THRESHOLD1);
+  Blynk.syncVirtual(BLYNK_DISPLAY_MAX_THRESHOLD2);
+  Blynk.syncVirtual(BLYNK_DISPLAY_MAX_THRESHOLD3);
 
-  BLYNK_setAlarmLed0(alarmSensor1);
+  BLYNK_setAlarmLed0(alarmSensor[0]);
 
 }
