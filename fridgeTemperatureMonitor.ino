@@ -16,7 +16,7 @@
 #include "blynk.h"
 
 #define APP_NAME "TemperatureMonitor"
-const String VERSION = "Version 0.04";
+const String VERSION = "Version 0.05";
 
 /*******************************************************************************
  * changes in version 0.01:
@@ -32,11 +32,13 @@ const String VERSION = "Version 0.04";
  * changes in version 0.04:
       * alarms get reset when temperature is below threshold
       * added new version of the blynk app
+ * changes in version 0.05:
+      * notifications of alarms via the blynk app
+      * set thresholds from the blynk app
 
 TODO:
-  * set thresholds from the blynk app
   * store thresholds for alarms in eeprom
-  * pushbullet notifications of alarms
+
 *******************************************************************************/
 
 /*******************************************************************************
@@ -142,6 +144,7 @@ char auth[] = BLYNK_AUTH_TOKEN;
 #define BLYNK_LED_ALARM_SENSOR2 V22
 #define BLYNK_LED_ALARM_SENSOR3 V23
 
+//blynk leds - source: http://docs.blynk.cc/#widgets-displays-led
 WidgetLED blynkAlarmSensor0(BLYNK_LED_ALARM_SENSOR0); //register led to virtual pin V20
 WidgetLED blynkAlarmSensor1(BLYNK_LED_ALARM_SENSOR1); //register led to virtual pin V21
 WidgetLED blynkAlarmSensor2(BLYNK_LED_ALARM_SENSOR2); //register led to virtual pin V22
@@ -222,7 +225,7 @@ void loop() {
     float sensorReading = readSensor(sensorToRead);
 
     //publish and expose in the Particle Cloud and blynk server the reading of the sensor
-    publishsensorReading(sensorToRead, sensorReading);
+    publishSensorReading(sensorToRead, sensorReading);
 
     //verify the reading has not exceeded the threshold
     if ( thresholdExceeded(sensorToRead, sensorReading) ){
@@ -240,27 +243,30 @@ void loop() {
 
     if (USE_BLYNK == "yes") {
       BLYNK_setAlarmLed0(alarmSensor[0]);
+      BLYNK_setAlarmLed1(alarmSensor[1]);
+      BLYNK_setAlarmLed2(alarmSensor[2]);
+      BLYNK_setAlarmLed3(alarmSensor[3]);
     }
 
-    //debug
-    Particle.publish("debug", String(sensorThreshold[0]), 60, PRIVATE);
+    //debug - by moving the slider in the blynk app I know the blynk app is really connected
+    // to the photon if this variable shows the updated value
+    Particle.publish("debug threshold0 is: ", String(sensorThreshold[0]), 60, PRIVATE);
 
   }
 
   //publish readings to the blynk server every minute so the History Graph gets updated
-  // even when the blynk app is not on
+  // even when the blynk app is not on (running) in the users phone
   //is it time to store in the blynk cloud? if so, do it
-  if (blynkStoreInterval > BLYNK_STORE_INTERVAL) {
+  if ( (USE_BLYNK == "yes") and (blynkStoreInterval > BLYNK_STORE_INTERVAL) ) {
 
     //reset timer
     blynkStoreInterval = 0;
 
-    if (USE_BLYNK == "yes") {
-      Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0, sensorReading[0]);
-      Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1, sensorReading[1]);
-      Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2, sensorReading[2]);
-      Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3, sensorReading[3]);
-    }
+    //publish every sensor reading to the blynk cloud
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0, sensorReading[0]);
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1, sensorReading[1]);
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2, sensorReading[2]);
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3, sensorReading[3]);
 
   }
 
@@ -316,12 +322,12 @@ float readSensor( int sensorIndex )
 }
 
 /*******************************************************************************
- * Function Name  : publishsensorReading
+ * Function Name  : publishSensorReading
  * Description    : the temperature passed as parameter gets stored in an internal variable
-                    and then published to the Particle Cloud and the blynk server
- * Return         : 0
+                    and then published to the Particle Cloud (with a call to Particle.publish)
+ * Return         : nothing
  *******************************************************************************/
-int publishsensorReading( int sensorIndex, float temperature ) {
+void publishSensorReading( int sensorIndex, float temperature ) {
 
   char currentTempChar[32];
   int currentTempDecimals = (temperature - (int)temperature) * 100;
@@ -342,25 +348,6 @@ int publishsensorReading( int sensorIndex, float temperature ) {
   //publish reading in the console logs of the dashboard at https://dashboard.particle.io/user/logs
   Particle.publish(APP_NAME, tempToBePublished + getTemperatureUnit(), 60, PRIVATE);
 
-  if (USE_BLYNK == "yes") {
-    switch (sensorIndex)
-    {
-      case 1:
-        BLYNK_READ(BLYNK_DISPLAY_SENSOR0);
-        break;
-      case 2:
-        BLYNK_READ(BLYNK_DISPLAY_SENSOR1);
-        break;
-      case 3:
-        BLYNK_READ(BLYNK_DISPLAY_SENSOR2);
-        break;
-      case 4:
-        BLYNK_READ(BLYNK_DISPLAY_SENSOR3);
-        break;
-    }
-  }
-
-  return 0;
 }
 
 /*******************************************************************************
@@ -416,19 +403,15 @@ void setAlarmForSensor( int sensorIndex ) {
     return;
   }
 
+  //set alarm flag
   alarmSensor[sensorIndex] = true;
 
   //reset alarm timer
-  //TODO: add this var on top alarm_timer = 0;
   alarmSensor_timer[sensorIndex] = 0;
 
   //set next alarm
-  //TODO: alarm_index = 0;
   alarmSensor_index[sensorIndex] = 0;
-  //TODO: next_alarm = alarms_array[0];
   alarmSensor_next_alarm[sensorIndex] = alarms_array[0];
-
-  return;
 
 }
 
@@ -449,24 +432,25 @@ void resetAlarmForSensor( int sensorIndex ) {
  *******************************************************************************/
 void sendAlarmToUser( int sensorIndex ) {
 
-    //is time up for sending the next alarm to the user?
-    if (alarmSensor_timer[sensorIndex] < alarmSensor_next_alarm[sensorIndex]) {
-        return;
-    }
+  //is time up for sending the next alarm to the user?
+  if (alarmSensor_timer[sensorIndex] < alarmSensor_next_alarm[sensorIndex]) {
+    return;
+  }
 
-    //time is up, so reset timer
-    alarmSensor_timer[sensorIndex] = 0;
+  //time is up, so reset timer
+  alarmSensor_timer[sensorIndex] = 0;
 
-    //set next alarm or just keep current one if there are no more alarms to set
-    if (alarmSensor_index[sensorIndex] < arraySize(alarms_array)-1) {
-        alarmSensor_index[sensorIndex] = alarmSensor_index[sensorIndex] + 1;
-        alarmSensor_next_alarm[sensorIndex] = alarms_array[alarmSensor_index[sensorIndex]];
-    }
+  //set next alarm or just keep current one if there are no more alarms to set
+  if (alarmSensor_index[sensorIndex] < arraySize(alarms_array)-1) {
+    alarmSensor_index[sensorIndex] = alarmSensor_index[sensorIndex] + 1;
+    alarmSensor_next_alarm[sensorIndex] = alarms_array[alarmSensor_index[sensorIndex]];
+  }
 
-    //publish readings in the console logs of the dashboard at https://dashboard.particle.io/user/logs
-    Particle.publish(APP_NAME, "Threshold exceeded for sensor " + String(sensorIndex), 60, PRIVATE);
+  //publish readings in the console logs of the dashboard at https://dashboard.particle.io/user/logs
+  Particle.publish(APP_NAME, "Threshold exceeded for sensor " + String(sensorIndex), 60, PRIVATE);
 
-   return;
+  Blynk.notify("Threshold exceeded for sensor " + String(sensorIndex));
+
 }
 
 /*******************************************************************************/
@@ -477,9 +461,9 @@ void sendAlarmToUser( int sensorIndex ) {
 
 /*******************************************************************************
  * Function Name  : BLYNK_READ
- * Description    : sends the value of sensor1, sensor2, sensor3, sensor4 to the
-                    corresponding widget in the blynk app
-                    source: http://docs.blynk.cc/#widgets-displays-value-display
+ * Description    : these functions are called by blynk when the blynk app wants
+                     to read values from the photon
+                    source: http://docs.blynk.cc/#blynk-main-operations-get-data-from-hardware
  *******************************************************************************/
 BLYNK_READ(BLYNK_DISPLAY_SENSOR0) {
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0, sensorReading[0]);
@@ -505,15 +489,6 @@ BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD2) {
 BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD3) {
   Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD3, sensorThreshold[3]);
 }
-
-//this is a blynk slider
-// source: http://docs.blynk.cc/#widgets-controllers-slider
-BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD0) {
-   sensorThreshold[0] = float(param.asInt());
-}
-
-//this is a blynk led
-// source: http://docs.blynk.cc/#widgets-displays-led
 BLYNK_READ(BLYNK_LED_ALARM_SENSOR0) {
   if ( alarmSensor[0] ) {
     blynkAlarmSensor0.on();
@@ -521,16 +496,85 @@ BLYNK_READ(BLYNK_LED_ALARM_SENSOR0) {
     blynkAlarmSensor0.off();
   }
 }
-
-void BLYNK_setAlarmLed0(bool alarm) {
-  if (USE_BLYNK == "yes") {
-    if ( alarm ) {
-      blynkAlarmSensor0.on();
-    } else {
-      blynkAlarmSensor0.off();
-    }
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR1) {
+  if ( alarmSensor[1] ) {
+    blynkAlarmSensor1.on();
+  } else {
+    blynkAlarmSensor1.off();
   }
 }
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR2) {
+  if ( alarmSensor[2] ) {
+    blynkAlarmSensor2.on();
+  } else {
+    blynkAlarmSensor2.off();
+  }
+}
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR3) {
+  if ( alarmSensor[3] ) {
+    blynkAlarmSensor3.on();
+  } else {
+    blynkAlarmSensor3.off();
+  }
+}
+
+/*******************************************************************************
+ * Function Name  : BLYNK_WRITE
+ * Description    : these functions are called by blynk when the blynk app wants
+                     to write values to the photon
+                    source: http://docs.blynk.cc/#blynk-main-operations-send-data-from-app-to-hardware
+ *******************************************************************************/
+//this is a blynk slider
+// source: http://docs.blynk.cc/#widgets-controllers-slider
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD0) {
+   sensorThreshold[0] = float(param.asInt());
+}
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD1) {
+   sensorThreshold[1] = float(param.asInt());
+}
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD2) {
+   sensorThreshold[2] = float(param.asInt());
+}
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD3) {
+   sensorThreshold[3] = float(param.asInt());
+}
+
+/*******************************************************************************
+ * Function Name  : BLYNK_WRITE
+ * Description    : these functions are called by blynk when the blynk app wants
+                     to write values to the photon
+                    source: http://docs.blynk.cc/#blynk-main-operations-send-data-from-app-to-hardware
+ *******************************************************************************/
+
+void BLYNK_setAlarmLed0(bool alarm) {
+  if ( alarm ) {
+    blynkAlarmSensor0.on();
+  } else {
+    blynkAlarmSensor0.off();
+  }
+}
+void BLYNK_setAlarmLed1(bool alarm) {
+  if ( alarm ) {
+    blynkAlarmSensor1.on();
+  } else {
+    blynkAlarmSensor1.off();
+  }
+}
+void BLYNK_setAlarmLed2(bool alarm) {
+  if ( alarm ) {
+    blynkAlarmSensor2.on();
+  } else {
+    blynkAlarmSensor2.off();
+  }
+}
+void BLYNK_setAlarmLed3(bool alarm) {
+  if ( alarm ) {
+    blynkAlarmSensor3.on();
+  } else {
+    blynkAlarmSensor3.off();
+  }
+}
+
 
 BLYNK_CONNECTED() {
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR0);
@@ -543,5 +587,8 @@ BLYNK_CONNECTED() {
   Blynk.syncVirtual(BLYNK_DISPLAY_MAX_THRESHOLD3);
 
   BLYNK_setAlarmLed0(alarmSensor[0]);
+  BLYNK_setAlarmLed1(alarmSensor[1]);
+  BLYNK_setAlarmLed2(alarmSensor[2]);
+  BLYNK_setAlarmLed3(alarmSensor[3]);
 
 }
