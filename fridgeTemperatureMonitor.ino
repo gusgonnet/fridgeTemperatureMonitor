@@ -16,7 +16,7 @@
 #include "blynk.h"
 
 #define APP_NAME "TemperatureMonitor"
-const String VERSION = "Version 0.05";
+const String VERSION = "Version 0.06";
 
 /*******************************************************************************
  * changes in version 0.01:
@@ -35,9 +35,8 @@ const String VERSION = "Version 0.05";
  * changes in version 0.05:
       * notifications of alarms via the blynk app
       * set thresholds from the blynk app
-
-TODO:
-  * store thresholds for alarms in eeprom
+ * changes in version 0.06:
+      * store thresholds for alarms in eeprom
 
 *******************************************************************************/
 
@@ -85,6 +84,25 @@ unsigned long alarmSensor_next_alarm[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
  thresholds for each sensor
 *******************************************************************************/
 float sensorThreshold[MAX_NUMBER_OF_SENSORS] = { 0, 0, 0, 0 };
+
+/*******************************************************************************
+ structure for writing thresholds in eeprom
+ https://docs.particle.io/reference/firmware/photon/#eeprom
+*******************************************************************************/
+//randomly chosen value here. It matters that is not 255 - since 255 is the default
+// value for uninitialized eeprom
+#define EEPROM_VERSION 137
+#define EEPROM_ADDRESS 0
+
+struct EepromMemoryStructure {
+  uint8_t version = EEPROM_VERSION;
+  float sensorThresholdInEeprom[MAX_NUMBER_OF_SENSORS];
+};
+EepromMemoryStructure eepromMemory;
+
+bool settingsHaveChanged = false;
+elapsedMillis settingsHaveChanged_timer;
+#define SAVE_SETTINGS_INTERVAL 10000
 
 /*******************************************************************************
  Other variables
@@ -203,6 +221,9 @@ void setup() {
 
   Time.zone(TIME_ZONE);
 
+  //restore settings (thresholds) from eeprom, if there were any saved beforehand
+  readFromEeprom();
+
 }
 
 /*******************************************************************************
@@ -235,40 +256,27 @@ void loop() {
       resetAlarmForSensor(sensorToRead);
     }
 
+    //update blynk leds for alarms if there is a need
+    updateBlynkLEDs();
+
+    //debug - by moving the slider in the blynk app I know the blynk app is really connected
+    // to the photon if this variable shows the updated value
+    Particle.publish("DEBUG: threshold " + String(sensorToRead) + " is: ", String(sensorThreshold[sensorToRead]), 60, PRIVATE);
+
     //increment the sensor to read
     sensorToRead = sensorToRead + 1;
     if ( sensorToRead == MAX_NUMBER_OF_SENSORS ) {
       sensorToRead = 0;
     }
 
-    if (USE_BLYNK == "yes") {
-      BLYNK_setAlarmLed0(alarmSensor[0]);
-      BLYNK_setAlarmLed1(alarmSensor[1]);
-      BLYNK_setAlarmLed2(alarmSensor[2]);
-      BLYNK_setAlarmLed3(alarmSensor[3]);
-    }
-
-    //debug - by moving the slider in the blynk app I know the blynk app is really connected
-    // to the photon if this variable shows the updated value
-    Particle.publish("debug threshold0 is: ", String(sensorThreshold[0]), 60, PRIVATE);
-
   }
 
   //publish readings to the blynk server every minute so the History Graph gets updated
   // even when the blynk app is not on (running) in the users phone
-  //is it time to store in the blynk cloud? if so, do it
-  if ( (USE_BLYNK == "yes") and (blynkStoreInterval > BLYNK_STORE_INTERVAL) ) {
+  updateBlynkCloud();
 
-    //reset timer
-    blynkStoreInterval = 0;
-
-    //publish every sensor reading to the blynk cloud
-    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0, sensorReading[0]);
-    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1, sensorReading[1]);
-    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2, sensorReading[2]);
-    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3, sensorReading[3]);
-
-  }
+  //every now and then we save the settings of the thresholds (only if they were changed)
+  saveSettings();
 
 }
 
@@ -325,7 +333,7 @@ float readSensor( int sensorIndex )
  * Function Name  : publishSensorReading
  * Description    : the temperature passed as parameter gets stored in an internal variable
                     and then published to the Particle Cloud (with a call to Particle.publish)
- * Return         : nothing
+ * Return         : none
  *******************************************************************************/
 void publishSensorReading( int sensorIndex, float temperature ) {
 
@@ -351,10 +359,9 @@ void publishSensorReading( int sensorIndex, float temperature ) {
 }
 
 /*******************************************************************************
- * Function Name  : readTemperature
- * Description    : read the value of the thermistor, convert it and
-                    store it in a public variable exposed in the cloud
- * Return         : 0
+ * Function Name  : readTheAnalogInput
+ * Description    : read the value of the input
+ * Return         : the reading of the input
  *******************************************************************************/
 int readTheAnalogInput( int sensorIndex )
 {
@@ -394,7 +401,7 @@ bool thresholdExceeded( int sensorIndex, float temperature ) {
 /*******************************************************************************
  * Function Name  : setAlarmForSensor
  * Description    : this function sets the alarm for a sensor
- * Return         : nothing
+ * Return         : none
  *******************************************************************************/
 void setAlarmForSensor( int sensorIndex ) {
 
@@ -418,17 +425,18 @@ void setAlarmForSensor( int sensorIndex ) {
 /*******************************************************************************
  * Function Name  : resetAlarmForSensor
  * Description    : this function resets the alarm for a sensor
- * Return         : nothing
+ * Return         : none
  *******************************************************************************/
 void resetAlarmForSensor( int sensorIndex ) {
 
   alarmSensor[sensorIndex] = false;
 
 }
+
 /*******************************************************************************
  * Function Name  : sendAlarmToUser
  * Description    : will fire notifications to the user at scheduled intervals
- * Return         : nothing
+ * Return         : none
  *******************************************************************************/
 void sendAlarmToUser( int sensorIndex ) {
 
@@ -524,28 +532,31 @@ BLYNK_READ(BLYNK_LED_ALARM_SENSOR3) {
                      to write values to the photon
                     source: http://docs.blynk.cc/#blynk-main-operations-send-data-from-app-to-hardware
  *******************************************************************************/
-//this is a blynk slider
+//this are all blynk sliders
 // source: http://docs.blynk.cc/#widgets-controllers-slider
 BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD0) {
    sensorThreshold[0] = float(param.asInt());
+   flagSettingsHaveChanged();
 }
 BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD1) {
    sensorThreshold[1] = float(param.asInt());
+   flagSettingsHaveChanged();
 }
 BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD2) {
    sensorThreshold[2] = float(param.asInt());
+   flagSettingsHaveChanged();
 }
 BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD3) {
    sensorThreshold[3] = float(param.asInt());
+   flagSettingsHaveChanged();
 }
 
 /*******************************************************************************
- * Function Name  : BLYNK_WRITE
- * Description    : these functions are called by blynk when the blynk app wants
-                     to write values to the photon
+ * Function Name  : BLYNK_setAlarmLedX
+ * Description    : these functions are called by our program to update the status
+                    of the alarm leds in the blynk cloud and the blynk app
                     source: http://docs.blynk.cc/#blynk-main-operations-send-data-from-app-to-hardware
- *******************************************************************************/
-
+*******************************************************************************/
 void BLYNK_setAlarmLed0(bool alarm) {
   if ( alarm ) {
     blynkAlarmSensor0.on();
@@ -590,5 +601,130 @@ BLYNK_CONNECTED() {
   BLYNK_setAlarmLed1(alarmSensor[1]);
   BLYNK_setAlarmLed2(alarmSensor[2]);
   BLYNK_setAlarmLed3(alarmSensor[3]);
+
+}
+
+/*******************************************************************************
+ * Function Name  : updateBlynkCloud
+ * Description    : publish readings to the blynk server every minute so the
+                    History Graph gets updated even when
+                    the blynk app is not on (running) in the users phone
+ * Return         : none
+ *******************************************************************************/
+void updateBlynkCloud() {
+
+  //is it time to store in the blynk cloud? if so, do it
+  if ( (USE_BLYNK == "yes") and (blynkStoreInterval > BLYNK_STORE_INTERVAL) ) {
+
+    //reset timer
+    blynkStoreInterval = 0;
+
+    //publish every sensor reading to the blynk cloud
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0, sensorReading[0]);
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1, sensorReading[1]);
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2, sensorReading[2]);
+    Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3, sensorReading[3]);
+
+  }
+
+}
+
+/*******************************************************************************
+ * Function Name  : updateBlynkLEDs
+ * Description    : updated the blynk alarm LEDs in the blynk app
+ * Return         : none
+ *******************************************************************************/
+void updateBlynkLEDs() {
+
+  if (USE_BLYNK == "yes") {
+    BLYNK_setAlarmLed0(alarmSensor[0]);
+    BLYNK_setAlarmLed1(alarmSensor[1]);
+    BLYNK_setAlarmLed2(alarmSensor[2]);
+    BLYNK_setAlarmLed3(alarmSensor[3]);
+  }
+
+}
+
+/*******************************************************************************/
+/*******************************************************************************/
+/*******************          EEPROM FUNCTIONS         *************************/
+/********  https://docs.particle.io/reference/firmware/photon/#eeprom  *********/
+/*******************************************************************************/
+/*******************************************************************************/
+
+/*******************************************************************************
+ * Function Name  : flagSettingsHaveChanged
+ * Description    : this function gets called when the user of the blynk app
+                    changes a setting. The blynk app calls the blynk cloud and in turn
+                    it calls the functions BLYNK_WRITE()
+ * Return         : none
+ *******************************************************************************/
+void flagSettingsHaveChanged()
+{
+  settingsHaveChanged = true;
+  settingsHaveChanged_timer = 0;
+
+}
+
+/*******************************************************************************
+ * Function Name  : readFromEeprom
+ * Description    : retrieves the settings from the EEPROM memory
+ * Return         : none
+ *******************************************************************************/
+void readFromEeprom()
+{
+
+  EepromMemoryStructure myObj;
+  EEPROM.get(EEPROM_ADDRESS, myObj);
+
+  //verify this eeprom was written before
+  // if version is 255 it means the eeprom was never written in the first place, hence the
+  // data just read with the previous EEPROM.get() is invalid and we will ignore it
+  if ( myObj.version == EEPROM_VERSION ) {
+    //this assignment gives a compiler error and I don't know why
+    // so I'm solving this issue with the for loop below
+    //sensorThreshold = myObj.sensorThresholdInEeprom;
+    for (int i = 0; i < arraySize(myObj.sensorThresholdInEeprom); i++) {
+      sensorThreshold[i] = myObj.sensorThresholdInEeprom[i];
+    }
+    Particle.publish(APP_NAME, "DEBUG: read new data from EEPROM", 60, PRIVATE);
+  }
+
+}
+
+/*******************************************************************************
+ * Function Name  : saveSettings
+ * Description    : in this function we wait a bit to give the user time
+                    to adjust the right value for them and in this way we try not
+                    to save in EEPROM at every little change.
+                    Remember that each eeprom writing cycle is a precious and finite resource
+ * Return         : none
+ *******************************************************************************/
+void saveSettings() {
+
+  //if no settings were changed, get out of here
+  if (not settingsHaveChanged) {
+    return;
+  }
+
+  //if settings have changed, is it time to store them?
+  if (settingsHaveChanged_timer < SAVE_SETTINGS_INTERVAL) {
+    return;
+  }
+
+  //reset timer
+  settingsHaveChanged_timer = 0;
+
+  //store thresholds in the struct type that will be saved in the eeprom
+  eepromMemory.version = EEPROM_VERSION;
+  //this assignment gives a compiler error and I don't know why
+  // so I'm solving this issue with the for loop below
+  //eepromMemory.sensorThresholdInEeprom = sensorThreshold;
+  for (int i = 0; i < arraySize(sensorThreshold); i++) {
+    eepromMemory.sensorThresholdInEeprom[i] = sensorThreshold[i];
+  }
+
+  //then save
+  EEPROM.put(EEPROM_ADDRESS, eepromMemory);
 
 }
