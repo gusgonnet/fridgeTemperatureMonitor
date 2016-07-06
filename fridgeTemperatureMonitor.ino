@@ -16,7 +16,7 @@
 #include "blynk.h"
 
 #define APP_NAME "TemperatureMonitor"
-const String VERSION = "Version 0.06";
+const String VERSION = "Version 0.07";
 
 /*******************************************************************************
  * changes in version 0.01:
@@ -37,6 +37,10 @@ const String VERSION = "Version 0.06";
       * set thresholds from the blynk app
  * changes in version 0.06:
       * store thresholds for alarms in eeprom
+ * changes in version 0.07:
+      * adding blynk email notifications
+      * changed sensors display index to a human format
+        example: sensor0 is displayed to user as "sensor 1" (in the blynk app, the notifications and emails)
 
 *******************************************************************************/
 
@@ -89,8 +93,8 @@ float sensorThreshold[MAX_NUMBER_OF_SENSORS] = { 0, 0, 0, 0 };
  structure for writing thresholds in eeprom
  https://docs.particle.io/reference/firmware/photon/#eeprom
 *******************************************************************************/
-//randomly chosen value here. It matters that is not 255 - since 255 is the default
-// value for uninitialized eeprom
+//randomly chosen value here. The only thing that matters is that it's not 255
+// since 255 is the default value for uninitialized eeprom
 #define EEPROM_VERSION 137
 #define EEPROM_ADDRESS 0
 
@@ -339,7 +343,7 @@ void publishSensorReading( int sensorIndex, float temperature ) {
 
   char currentTempChar[32];
   int currentTempDecimals = (temperature - (int)temperature) * 100;
-  String tempToBePublished = "Sensor " + String(sensorIndex) + ": ";
+  String tempToBePublished = "Sensor " + String(sensorIndex+1) + ": ";
 
   //this is a fix required for displaying properly negative temperatures
   // without the abs(), the project will display something like "-4.-87"
@@ -455,9 +459,10 @@ void sendAlarmToUser( int sensorIndex ) {
   }
 
   //publish readings in the console logs of the dashboard at https://dashboard.particle.io/user/logs
-  Particle.publish(APP_NAME, "Threshold exceeded for sensor " + String(sensorIndex), 60, PRIVATE);
+  Particle.publish(APP_NAME, "Threshold exceeded for sensor " + String(sensorIndex+1), 60, PRIVATE);
 
-  Blynk.notify("Threshold exceeded for sensor " + String(sensorIndex));
+  Blynk.notify("Threshold exceeded for sensor " + String(sensorIndex+1));
+  Blynk.email(EMAIL_ADDRESS, "TEMPERATURE ALARM", "Threshold exceeded for sensor " + String(sensorIndex+1));
 
 }
 
