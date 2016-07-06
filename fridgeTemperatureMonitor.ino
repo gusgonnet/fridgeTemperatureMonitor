@@ -38,7 +38,7 @@ const String VERSION = "Version 0.07";
  * changes in version 0.06:
       * store thresholds for alarms in eeprom
  * changes in version 0.07:
-      * adding blynk email notifications
+      * adding blynk email notifications (set email in blynkAuthToken.h: #define EMAIL_ADDRESS "example_email@gmail.com")
       * changed sensors display index to a human format
         example: sensor0 is displayed to user as "sensor 1" (in the blynk app, the notifications and emails)
 
