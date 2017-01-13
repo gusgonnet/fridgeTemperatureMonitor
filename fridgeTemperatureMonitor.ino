@@ -45,6 +45,7 @@ const String VERSION = "Version 0.08";
  * changes in version 0.08:
       * adding the Calibration tab on the blynk app to calibrate sensors reading
       * stepped up EEPROM_VERSION to 138
+      * Calibration settings are stored in eeprom
 
 *******************************************************************************/
 
