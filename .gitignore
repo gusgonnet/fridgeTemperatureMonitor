@@ -1,6 +1,8 @@
 elapsedMillis.h
-blynk
-blynk.h
-blynkAuthToken.h
 horas.txt
+localData.h
+.vscode
 *bin
+Blynk*
+Widget*
+blynk*

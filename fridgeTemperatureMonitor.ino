@@ -1,3 +1,6 @@
+PRODUCT_ID(1274);
+PRODUCT_VERSION(10);
+
 #include <math.h>
 #include <application.h>
 #include "blynkAuthToken.h"
@@ -14,9 +17,10 @@
 *******************************************************************************/
 #include "elapsedMillis.h"
 #include "blynk.h"
+#include "localData.h"
 
 #define APP_NAME "TemperatureMonitor"
-const String VERSION = "Version 0.08";
+const String VERSION = "Version 10";
 
 /*******************************************************************************
  * changes in version 0.01:
@@ -46,6 +50,9 @@ const String VERSION = "Version 0.08";
       * adding the Calibration tab on the blynk app to calibrate sensors reading
       * stepped up EEPROM_VERSION to 138
       * Calibration settings are stored in eeprom
+FROM NOW ON WE FOLLOW THE PARTICLE's VERSION
+ * changes in version 10:
+      * adding ubidots support for temperature, thresholds and alarms
 
 *******************************************************************************/
 
@@ -77,28 +84,28 @@ float sensorReadingFloat[MAX_NUMBER_OF_SENSORS];
 // A2 : thermistor 2
 // A3 : thermistor 3
 // and so on...
-const int INPUT_SENSOR[8] = { A0, A1, A2, A3, A4, A5, A6, A7 };
+const int INPUT_SENSOR[8] = {A0, A1, A2, A3, A4, A5, A6, A7};
 
 /*******************************************************************************
  alarms variables for each sensor
 *******************************************************************************/
-bool alarmSensor[8] = { false, false, false, false, false, false, false, false };
+bool alarmSensor[8] = {false, false, false, false, false, false, false, false};
 
 elapsedMillis alarmSensor_timer[8];
 
-int alarmSensor_index[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+int alarmSensor_index[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-unsigned long alarmSensor_next_alarm[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+unsigned long alarmSensor_next_alarm[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
 /*******************************************************************************
  thresholds for each sensor
 *******************************************************************************/
-float sensorThreshold[MAX_NUMBER_OF_SENSORS] = { 0, 0, 0, 0 };
+float sensorThreshold[MAX_NUMBER_OF_SENSORS] = {0, 0, 0, 0};
 
 /*******************************************************************************
  calibration for each sensor
 *******************************************************************************/
-float calibration[MAX_NUMBER_OF_SENSORS] = { 0, 0, 0, 0 };
+float calibration[MAX_NUMBER_OF_SENSORS] = {0, 0, 0, 0};
 
 /*******************************************************************************
  structure for writing thresholds in eeprom
@@ -110,7 +117,8 @@ float calibration[MAX_NUMBER_OF_SENSORS] = { 0, 0, 0, 0 };
 #define EEPROM_VERSION_137 137
 #define EEPROM_ADDRESS 0
 
-struct EepromMemoryStructure {
+struct EepromMemoryStructure
+{
   uint8_t version = EEPROM_VERSION;
   float sensorThresholdInEeprom[MAX_NUMBER_OF_SENSORS];
   float calibrationInEeprom[MAX_NUMBER_OF_SENSORS];
@@ -190,8 +198,14 @@ char auth[] = BLYNK_AUTH_TOKEN;
 #define BLYNK_DISPLAY_CALIBRATE2 V16
 #define BLYNK_DISPLAY_CALIBRATE3 V17
 
-#define BLYNK_DISPLAY_SENSORS { V0, V1, V2, V3, V4, V5, V6, V7 }
-#define BLYNK_DISPLAY_MAX_THRESHOLDS { V10, V11, V12, V13, V14, V15, V16, V17 }
+#define BLYNK_DISPLAY_SENSORS      \
+  {                                \
+    V0, V1, V2, V3, V4, V5, V6, V7 \
+  }
+#define BLYNK_DISPLAY_MAX_THRESHOLDS       \
+  {                                        \
+    V10, V11, V12, V13, V14, V15, V16, V17 \
+  }
 
 //blynk leds - source: http://docs.blynk.cc/#widgets-displays-led
 WidgetLED blynkAlarmSensor0(BLYNK_LED_ALARM_SENSOR0); //register led to virtual pin V20
@@ -206,47 +220,78 @@ elapsedMillis blynkStoreInterval;
 /*******************************************************************************
  here we define the frequency of the alarms sent to the user
 *******************************************************************************/
-#define FIRST_ALARM 10000 //10 seconds
-#define SECOND_ALARM 60000 //1 minute
-#define THIRD_ALARM 300000 //5 minutes
-#define FOURTH_ALARM 900000 //15 minutes
-#define FIFTH_ALARM 3600000 //1 hour
+#define FIRST_ALARM 10000    //10 seconds
+#define SECOND_ALARM 60000   //1 minute
+#define THIRD_ALARM 300000   //5 minutes
+#define FOURTH_ALARM 900000  //15 minutes
+#define FIFTH_ALARM 3600000  //1 hour
 #define SIXTH_ALARM 14400000 //4 hours - and every 4 hours ever after, until the situation is rectified (ie no more water is detected)
-int alarms_array[6]={FIRST_ALARM, SECOND_ALARM, THIRD_ALARM, FOURTH_ALARM, FIFTH_ALARM, SIXTH_ALARM};
+int alarms_array[6] = {FIRST_ALARM, SECOND_ALARM, THIRD_ALARM, FOURTH_ALARM, FIFTH_ALARM, SIXTH_ALARM};
+
+/*******************************************************************************
+ ubidots variables
+
+ webhook definition:
+  Event name: ubidots
+  url: https://things.ubidots.com/api/v1.6/devices/{{ubi-dsl-vl}}/values/?token={{ubi-token}}
+  Request type: POST
+  Device: Any
+  Advanced settings:
+  Send custom data: JSON  
+  and then enter:
+    {
+    "value": "{{ubi-value}}"
+    }
+  include default data: no
+  enforce ssl: yes
+*******************************************************************************/
+// This value comes from ubidots
+const String ubidotsToken = UBIDOTS_TOKEN;
+
+//defines how often the measurements are sent to the cloud
+#define CLOUD_PUBLISH_INTERVAL 900000
+elapsedMillis cloudPublish_timer;
 
 /*******************************************************************************
  * Function Name  : setup
  * Description    : this function runs once at system boot
  *******************************************************************************/
-void setup() {
+void setup()
+{
 
   //publish startup message with firmware version
   Particle.publish(APP_NAME, VERSION, 60, PRIVATE);
 
   //declare and init all analog pins as inputs
   uint8_t i;
-  for (i=0; i < 8; i++) {
+  for (i = 0; i < 8; i++)
+  {
     pinMode(INPUT_SENSOR[i], INPUT);
   }
 
   //declare cloud variables
   //https://docs.particle.io/reference/firmware/photon/#particle-variable-
   //Currently, up to 10 cloud variables may be defined and each variable name is limited to a maximum of 12 characters
-  if (Particle.variable("sensor0", sensorReadingString[0])==false) {
+  if (Particle.variable("sensor0", sensorReadingString[0]) == false)
+  {
     Particle.publish(APP_NAME, "ERROR: Failed to register variable sensor0", 60, PRIVATE);
   }
-  if (Particle.variable("sensor1", sensorReadingString[1])==false) {
+  if (Particle.variable("sensor1", sensorReadingString[1]) == false)
+  {
     Particle.publish(APP_NAME, "ERROR: Failed to register variable sensor1", 60, PRIVATE);
   }
-  if (Particle.variable("sensor2", sensorReadingString[2])==false) {
+  if (Particle.variable("sensor2", sensorReadingString[2]) == false)
+  {
     Particle.publish(APP_NAME, "ERROR: Failed to register variable sensor2", 60, PRIVATE);
   }
-  if (Particle.variable("sensor3", sensorReadingString[3])==false) {
+  if (Particle.variable("sensor3", sensorReadingString[3]) == false)
+  {
     Particle.publish(APP_NAME, "ERROR: Failed to register variable sensor3", 60, PRIVATE);
   }
 
   //init Blynk
-  if (USE_BLYNK == "yes") {
+  if (USE_BLYNK == "yes")
+  {
     Blynk.begin(auth);
   }
 
@@ -254,21 +299,23 @@ void setup() {
 
   //restore settings (thresholds) from eeprom, if there were any saved before
   readFromEeprom();
-
 }
 
 /*******************************************************************************
  * Function Name  : loop
  * Description    : this function runs continuously while the project is running
  *******************************************************************************/
-void loop() {
+void loop()
+{
 
-  if (USE_BLYNK == "yes") {
+  if (USE_BLYNK == "yes")
+  {
     Blynk.run();
   }
 
   //is it time to read a sensor? if so, do it
-  if (sensorSampleInterval > SENSOR_SAMPLE_INTERVAL) {
+  if (sensorSampleInterval > SENSOR_SAMPLE_INTERVAL)
+  {
 
     //reset timer
     sensorSampleInterval = 0;
@@ -279,16 +326,19 @@ void loop() {
     //store the sensor reading in the internal array of floats
     sensorReadingFloat[sensorToRead] = sensorMeasurement;
     //store the sensor reading in the array of exposed variables in the Particle Cloud
-    sensorReadingString[sensorToRead] = userFriendlyTemperature( getCalibratedSensorReading(sensorToRead) );
+    sensorReadingString[sensorToRead] = userFriendlyTemperature(getCalibratedSensorReading(sensorToRead));
 
     //publish the reading of the sensor
     publishSensorReading(sensorToRead);
 
     //verify the reading has not exceeded the threshold
-    if ( thresholdExceeded(sensorToRead, getCalibratedSensorReading(sensorToRead)) ){
+    if (thresholdExceeded(sensorToRead, getCalibratedSensorReading(sensorToRead)))
+    {
       setAlarmForSensor(sensorToRead);
       sendAlarmToUser(sensorToRead);
-    } else {
+    }
+    else
+    {
       resetAlarmForSensor(sensorToRead);
     }
 
@@ -301,10 +351,10 @@ void loop() {
 
     //increment the sensor to read
     sensorToRead = sensorToRead + 1;
-    if ( sensorToRead == MAX_NUMBER_OF_SENSORS ) {
+    if (sensorToRead == MAX_NUMBER_OF_SENSORS)
+    {
       sensorToRead = 0;
     }
-
   }
 
   //publish readings to the blynk server every minute so the History Graph gets updated
@@ -314,6 +364,8 @@ void loop() {
   //every now and then we save the settings of the thresholds (only if they were changed)
   saveSettings();
 
+  // publish readings to the ubidots cloud
+  publishTemperatureToUbidots();
 }
 
 /*******************************************************************************
@@ -322,7 +374,7 @@ void loop() {
                     store it in a public variable exposed in the cloud
  * Return         : the reading of the sensor in float
  *******************************************************************************/
-float readSensor( int sensorIndex )
+float readSensor(int sensorIndex)
 {
 
   //store the average of the readings here
@@ -333,33 +385,36 @@ float readSensor( int sensorIndex )
 
   //take N samples in a row, with a slight delay
   uint8_t i;
-  for (i=0; i < NUMSAMPLES; i++) {
+  for (i = 0; i < NUMSAMPLES; i++)
+  {
     samples[i] = readTheAnalogInput(sensorIndex);
     delay(10);
   }
 
   //average all the samples
   average = 0;
-  for (i=0; i< NUMSAMPLES; i++) {
+  for (i = 0; i < NUMSAMPLES; i++)
+  {
     average += samples[i];
   }
   average /= NUMSAMPLES;
 
   //convert the value to resistance
-  average = (4095 / average)  - 1;
+  average = (4095 / average) - 1;
   average = SERIESRESISTOR / average;
 
   float steinhart;
-  steinhart = average / THERMISTORNOMINAL;     // (R/Ro)
-  steinhart = log(steinhart);                  // ln(R/Ro)
-  steinhart /= BCOEFFICIENT;                   // 1/B * ln(R/Ro)
+  steinhart = average / THERMISTORNOMINAL;          // (R/Ro)
+  steinhart = log(steinhart);                       // ln(R/Ro)
+  steinhart /= BCOEFFICIENT;                        // 1/B * ln(R/Ro)
   steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
-  steinhart = 1.0 / steinhart;                 // Invert
-  steinhart -= 273.15;                         // convert to C
+  steinhart = 1.0 / steinhart;                      // Invert
+  steinhart -= 273.15;                              // convert to C
 
   //Convert Celsius to Fahrenheit
-  if (useFahrenheit) {
-    steinhart = (steinhart * 9.0)/ 5.0 + 32.0;
+  if (useFahrenheit)
+  {
+    steinhart = (steinhart * 9.0) / 5.0 + 32.0;
   }
 
   return steinhart;
@@ -371,15 +426,15 @@ float readSensor( int sensorIndex )
                       (with a call to Particle.publish)
  * Return         : none
  *******************************************************************************/
-void publishSensorReading( int sensorIndex ) {
+void publishSensorReading(int sensorIndex)
+{
 
   String tempToBePublished = "Sensor " + userFriendlySensor(sensorIndex) + ": ";
-  tempToBePublished = tempToBePublished + userFriendlyTemperature( getCalibratedSensorReading(sensorIndex) );
+  tempToBePublished = tempToBePublished + userFriendlyTemperature(getCalibratedSensorReading(sensorIndex));
   tempToBePublished = tempToBePublished + getTemperatureUnit();
 
   //publish reading in the console logs of the dashboard at https://dashboard.particle.io/user/logs
   Particle.publish(APP_NAME, tempToBePublished, 60, PRIVATE);
-
 }
 
 /*******************************************************************************
@@ -387,9 +442,10 @@ void publishSensorReading( int sensorIndex ) {
  * Description    : this function returns the calibrated value of a sensor
  * Return         : the reading calibrated
  *******************************************************************************/
-float getCalibratedSensorReading( int sensorIndex ) {
+float getCalibratedSensorReading(int sensorIndex)
+{
   //calibrate reading from sensor
-  return sensorReadingFloat[sensorIndex] + ( calibration[sensorIndex] / 1000 );
+  return sensorReadingFloat[sensorIndex] + (calibration[sensorIndex] / 1000);
 }
 
 /*******************************************************************************
@@ -397,7 +453,8 @@ float getCalibratedSensorReading( int sensorIndex ) {
  * Description    : read the value of the input
  * Return         : the reading of the input
  *******************************************************************************/
-int readTheAnalogInput( int sensorIndex ) {
+int readTheAnalogInput(int sensorIndex)
+{
   return analogRead(INPUT_SENSOR[sensorIndex]);
 }
 
@@ -406,10 +463,14 @@ int readTheAnalogInput( int sensorIndex ) {
  * Description    : return "°F" or "°C" according to useFahrenheit
  * Return         : String
  *******************************************************************************/
-String getTemperatureUnit() {
-  if ( useFahrenheit ) {
+String getTemperatureUnit()
+{
+  if (useFahrenheit)
+  {
     return "°F";
-  } else {
+  }
+  else
+  {
     return "°C";
   }
 }
@@ -421,8 +482,9 @@ String getTemperatureUnit() {
                     "Sensor 1 exceeded the threshold"
  * Return         : String
  *******************************************************************************/
-String userFriendlySensor( int sensorIndex ) {
-  return String (sensorIndex+1);
+String userFriendlySensor(int sensorIndex)
+{
+  return String(sensorIndex + 1);
 }
 
 /*******************************************************************************
@@ -430,7 +492,8 @@ String userFriendlySensor( int sensorIndex ) {
  * Description    : returns the temperature in string with 2 decimals
  * Return         : String
  *******************************************************************************/
-String userFriendlyTemperature( float temperature ) {
+String userFriendlyTemperature(float temperature)
+{
 
   //init vars
   char currentTempChar[32];
@@ -442,7 +505,7 @@ String userFriendlyTemperature( float temperature ) {
   currentTempDecimals = abs(currentTempDecimals);
 
   //this converts the temperature into a more user friendly format with 2 decimals
-  sprintf(currentTempChar,"%0d.%d", (int)temperature, currentTempDecimals);
+  sprintf(currentTempChar, "%0d.%d", (int)temperature, currentTempDecimals);
 
   return String(currentTempChar);
 }
@@ -454,14 +517,15 @@ String userFriendlyTemperature( float temperature ) {
  * Return         : false if threshold has not been exceeded
                     true if threshold has been exceeded
  *******************************************************************************/
-bool thresholdExceeded( int sensorIndex, float temperature ) {
+bool thresholdExceeded(int sensorIndex, float temperature)
+{
 
-  if ( sensorThreshold[sensorIndex] and ( temperature > sensorThreshold[sensorIndex] ) ) {
+  if (sensorThreshold[sensorIndex] and (temperature > sensorThreshold[sensorIndex]))
+  {
     return true;
   }
 
   return false;
-
 }
 
 /*******************************************************************************
@@ -469,10 +533,12 @@ bool thresholdExceeded( int sensorIndex, float temperature ) {
  * Description    : this function sets the alarm for a sensor
  * Return         : none
  *******************************************************************************/
-void setAlarmForSensor( int sensorIndex ) {
+void setAlarmForSensor(int sensorIndex)
+{
 
   //if the alarm is already set for the sensor, no need to do anything, since a notification is being fired
-  if (alarmSensor[sensorIndex]){
+  if (alarmSensor[sensorIndex])
+  {
     return;
   }
 
@@ -485,7 +551,6 @@ void setAlarmForSensor( int sensorIndex ) {
   //set next alarm
   alarmSensor_index[sensorIndex] = 0;
   alarmSensor_next_alarm[sensorIndex] = alarms_array[0];
-
 }
 
 /*******************************************************************************
@@ -493,9 +558,14 @@ void setAlarmForSensor( int sensorIndex ) {
  * Description    : this function resets the alarm for a sensor
  * Return         : none
  *******************************************************************************/
-void resetAlarmForSensor( int sensorIndex ) {
+void resetAlarmForSensor(int sensorIndex)
+{
 
-  alarmSensor[sensorIndex] = false;
+  // if the alarm is set for the sensor then reset it
+  if (alarmSensor[sensorIndex]) {
+    alarmSensor[sensorIndex] = false;
+    publishToUbidots("alarm_on_sensor" + userFriendlySensor(sensorIndex), "0");
+  }
 
 }
 
@@ -504,10 +574,12 @@ void resetAlarmForSensor( int sensorIndex ) {
  * Description    : will fire notifications to the user at scheduled intervals
  * Return         : none
  *******************************************************************************/
-void sendAlarmToUser( int sensorIndex ) {
+void sendAlarmToUser(int sensorIndex)
+{
 
   //is time up for sending the next alarm to the user?
-  if (alarmSensor_timer[sensorIndex] < alarmSensor_next_alarm[sensorIndex]) {
+  if (alarmSensor_timer[sensorIndex] < alarmSensor_next_alarm[sensorIndex])
+  {
     return;
   }
 
@@ -515,7 +587,8 @@ void sendAlarmToUser( int sensorIndex ) {
   alarmSensor_timer[sensorIndex] = 0;
 
   //set next alarm or just keep current one if there are no more alarms to set
-  if (alarmSensor_index[sensorIndex] < arraySize(alarms_array)-1) {
+  if (alarmSensor_index[sensorIndex] < arraySize(alarms_array) - 1)
+  {
     alarmSensor_index[sensorIndex] = alarmSensor_index[sensorIndex] + 1;
     alarmSensor_next_alarm[sensorIndex] = alarms_array[alarmSensor_index[sensorIndex]];
   }
@@ -525,6 +598,8 @@ void sendAlarmToUser( int sensorIndex ) {
 
   Blynk.notify("Threshold exceeded for sensor " + userFriendlySensor(sensorIndex));
   Blynk.email(EMAIL_ADDRESS, "TEMPERATURE ALARM", "Threshold exceeded for sensor " + userFriendlySensor(sensorIndex));
+
+  publishToUbidots("alarm_on_sensor" + userFriendlySensor(sensorIndex), "1");
 
 }
 
@@ -540,79 +615,111 @@ void sendAlarmToUser( int sensorIndex ) {
                      to read values from the photon
                     source: http://docs.blynk.cc/#blynk-main-operations-get-data-from-hardware
  *******************************************************************************/
-BLYNK_READ(BLYNK_DISPLAY_SENSOR0) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR0)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0, userFriendlyTemperature(getCalibratedSensorReading(0)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR1) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR1)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1, userFriendlyTemperature(getCalibratedSensorReading(1)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR2) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR2)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2, userFriendlyTemperature(getCalibratedSensorReading(2)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR3) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR3)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3, userFriendlyTemperature(getCalibratedSensorReading(3)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR0b) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR0b)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR0b, userFriendlyTemperature(getCalibratedSensorReading(0)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR1b) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR1b)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1b, userFriendlyTemperature(getCalibratedSensorReading(1)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR2b) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR2b)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2b, userFriendlyTemperature(getCalibratedSensorReading(2)));
 }
-BLYNK_READ(BLYNK_DISPLAY_SENSOR3b) {
+BLYNK_READ(BLYNK_DISPLAY_SENSOR3b)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3b, userFriendlyTemperature(getCalibratedSensorReading(3)));
 }
-BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD0) {
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD0)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD0, sensorThreshold[0]);
 }
-BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD1) {
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD1)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD1, sensorThreshold[1]);
 }
-BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD2) {
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD2)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD2, sensorThreshold[2]);
 }
-BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD3) {
+BLYNK_READ(BLYNK_DISPLAY_MAX_THRESHOLD3)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_MAX_THRESHOLD3, sensorThreshold[3]);
 }
-BLYNK_READ(BLYNK_DISPLAY_CALIBRATE0) {
+BLYNK_READ(BLYNK_DISPLAY_CALIBRATE0)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_CALIBRATE0, calibration[0]);
 }
-BLYNK_READ(BLYNK_DISPLAY_CALIBRATE1) {
+BLYNK_READ(BLYNK_DISPLAY_CALIBRATE1)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_CALIBRATE1, calibration[1]);
 }
-BLYNK_READ(BLYNK_DISPLAY_CALIBRATE2) {
+BLYNK_READ(BLYNK_DISPLAY_CALIBRATE2)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_CALIBRATE2, calibration[2]);
 }
-BLYNK_READ(BLYNK_DISPLAY_CALIBRATE3) {
+BLYNK_READ(BLYNK_DISPLAY_CALIBRATE3)
+{
   Blynk.virtualWrite(BLYNK_DISPLAY_CALIBRATE3, calibration[3]);
 }
-BLYNK_READ(BLYNK_LED_ALARM_SENSOR0) {
-  if ( alarmSensor[0] ) {
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR0)
+{
+  if (alarmSensor[0])
+  {
     blynkAlarmSensor0.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor0.off();
   }
 }
-BLYNK_READ(BLYNK_LED_ALARM_SENSOR1) {
-  if ( alarmSensor[1] ) {
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR1)
+{
+  if (alarmSensor[1])
+  {
     blynkAlarmSensor1.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor1.off();
   }
 }
-BLYNK_READ(BLYNK_LED_ALARM_SENSOR2) {
-  if ( alarmSensor[2] ) {
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR2)
+{
+  if (alarmSensor[2])
+  {
     blynkAlarmSensor2.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor2.off();
   }
 }
-BLYNK_READ(BLYNK_LED_ALARM_SENSOR3) {
-  if ( alarmSensor[3] ) {
+BLYNK_READ(BLYNK_LED_ALARM_SENSOR3)
+{
+  if (alarmSensor[3])
+  {
     blynkAlarmSensor3.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor3.off();
   }
 }
@@ -625,41 +732,49 @@ BLYNK_READ(BLYNK_LED_ALARM_SENSOR3) {
  *******************************************************************************/
 //this are all blynk sliders
 // source: http://docs.blynk.cc/#widgets-controllers-slider
-BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD0) {
-   sensorThreshold[0] = float(param.asInt());
-   flagSettingsHaveChanged();
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD0)
+{
+  sensorThreshold[0] = float(param.asInt());
+  flagSettingsHaveChanged();
 }
-BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD1) {
-   sensorThreshold[1] = float(param.asInt());
-   flagSettingsHaveChanged();
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD1)
+{
+  sensorThreshold[1] = float(param.asInt());
+  flagSettingsHaveChanged();
 }
-BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD2) {
-   sensorThreshold[2] = float(param.asInt());
-   flagSettingsHaveChanged();
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD2)
+{
+  sensorThreshold[2] = float(param.asInt());
+  flagSettingsHaveChanged();
 }
-BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD3) {
-   sensorThreshold[3] = float(param.asInt());
-   flagSettingsHaveChanged();
+BLYNK_WRITE(BLYNK_DISPLAY_MAX_THRESHOLD3)
+{
+  sensorThreshold[3] = float(param.asInt());
+  flagSettingsHaveChanged();
 }
 
-BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE0) {
+BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE0)
+{
   calibration[0] = float(param.asInt());
-  sensorReadingString[0] = userFriendlyTemperature( getCalibratedSensorReading(0) );
+  sensorReadingString[0] = userFriendlyTemperature(getCalibratedSensorReading(0));
   flagSettingsHaveChanged();
 }
-BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE1) {
+BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE1)
+{
   calibration[1] = float(param.asInt());
-  sensorReadingString[1] = userFriendlyTemperature( getCalibratedSensorReading(1) );
+  sensorReadingString[1] = userFriendlyTemperature(getCalibratedSensorReading(1));
   flagSettingsHaveChanged();
 }
-BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE2) {
+BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE2)
+{
   calibration[2] = float(param.asInt());
-  sensorReadingString[2] = userFriendlyTemperature( getCalibratedSensorReading(2) );
+  sensorReadingString[2] = userFriendlyTemperature(getCalibratedSensorReading(2));
   flagSettingsHaveChanged();
 }
-BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE3) {
+BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE3)
+{
   calibration[3] = float(param.asInt());
-  sensorReadingString[3] = userFriendlyTemperature( getCalibratedSensorReading(3) );
+  sensorReadingString[3] = userFriendlyTemperature(getCalibratedSensorReading(3));
   flagSettingsHaveChanged();
 }
 
@@ -669,37 +784,53 @@ BLYNK_WRITE(BLYNK_DISPLAY_CALIBRATE3) {
                     of the alarm leds in the blynk cloud and the blynk app
                     source: http://docs.blynk.cc/#blynk-main-operations-send-data-from-app-to-hardware
 *******************************************************************************/
-void BLYNK_setAlarmLed0(bool alarm) {
-  if ( alarm ) {
+void BLYNK_setAlarmLed0(bool alarm)
+{
+  if (alarm)
+  {
     blynkAlarmSensor0.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor0.off();
   }
 }
-void BLYNK_setAlarmLed1(bool alarm) {
-  if ( alarm ) {
+void BLYNK_setAlarmLed1(bool alarm)
+{
+  if (alarm)
+  {
     blynkAlarmSensor1.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor1.off();
   }
 }
-void BLYNK_setAlarmLed2(bool alarm) {
-  if ( alarm ) {
+void BLYNK_setAlarmLed2(bool alarm)
+{
+  if (alarm)
+  {
     blynkAlarmSensor2.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor2.off();
   }
 }
-void BLYNK_setAlarmLed3(bool alarm) {
-  if ( alarm ) {
+void BLYNK_setAlarmLed3(bool alarm)
+{
+  if (alarm)
+  {
     blynkAlarmSensor3.on();
-  } else {
+  }
+  else
+  {
     blynkAlarmSensor3.off();
   }
 }
 
-
-BLYNK_CONNECTED() {
+BLYNK_CONNECTED()
+{
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR0);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR1);
   Blynk.syncVirtual(BLYNK_DISPLAY_SENSOR2);
@@ -721,7 +852,6 @@ BLYNK_CONNECTED() {
   BLYNK_setAlarmLed1(alarmSensor[1]);
   BLYNK_setAlarmLed2(alarmSensor[2]);
   BLYNK_setAlarmLed3(alarmSensor[3]);
-
 }
 
 /*******************************************************************************
@@ -731,10 +861,12 @@ BLYNK_CONNECTED() {
                     the blynk app is not on (running) in the users phone
  * Return         : none
  *******************************************************************************/
-void updateBlynkCloud() {
+void updateBlynkCloud()
+{
 
   //is it time to store in the blynk cloud? if so, do it
-  if ( (USE_BLYNK == "yes") and (blynkStoreInterval > BLYNK_STORE_INTERVAL) ) {
+  if ((USE_BLYNK == "yes") and (blynkStoreInterval > BLYNK_STORE_INTERVAL))
+  {
 
     //reset timer
     blynkStoreInterval = 0;
@@ -750,9 +882,7 @@ void updateBlynkCloud() {
     Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR1b, userFriendlyTemperature(getCalibratedSensorReading(1)));
     Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR2b, userFriendlyTemperature(getCalibratedSensorReading(2)));
     Blynk.virtualWrite(BLYNK_DISPLAY_SENSOR3b, userFriendlyTemperature(getCalibratedSensorReading(3)));
-
   }
-
 }
 
 /*******************************************************************************
@@ -760,15 +890,16 @@ void updateBlynkCloud() {
  * Description    : updated the blynk alarm LEDs in the blynk app
  * Return         : none
  *******************************************************************************/
-void updateBlynkLEDs() {
+void updateBlynkLEDs()
+{
 
-  if (USE_BLYNK == "yes") {
+  if (USE_BLYNK == "yes")
+  {
     BLYNK_setAlarmLed0(alarmSensor[0]);
     BLYNK_setAlarmLed1(alarmSensor[1]);
     BLYNK_setAlarmLed2(alarmSensor[2]);
     BLYNK_setAlarmLed3(alarmSensor[3]);
   }
-
 }
 
 /*******************************************************************************/
@@ -789,7 +920,6 @@ void flagSettingsHaveChanged()
 {
   settingsHaveChanged = true;
   settingsHaveChanged_timer = 0;
-
 }
 
 /*******************************************************************************
@@ -811,32 +941,39 @@ void readFromEeprom()
   //EEPROM_VERSION_137 means that the eeprom contains data up to version 0.7
   // this data does not include the calibration parameters added in version 0.8
   //TODO: this code can be removed in version 0.9
-  if ( myObj.version == EEPROM_VERSION_137 ) {
-    for (int i = 0; i < arraySize(myObj.sensorThresholdInEeprom); i++) {
+  if (myObj.version == EEPROM_VERSION_137)
+  {
+    for (int i = 0; i < arraySize(myObj.sensorThresholdInEeprom); i++)
+    {
       sensorThreshold[i] = myObj.sensorThresholdInEeprom[i];
     }
     Particle.publish(APP_NAME, "DEBUG: read new data from EEPROM (" + String(EEPROM_VERSION_137) + ")", 60, PRIVATE);
   }
 
-  if ( myObj.version == EEPROM_VERSION ) {
+  if (myObj.version == EEPROM_VERSION)
+  {
 
     //this assignment gives a compiler error and I don't know why
     // so I'm solving this issue with the for loop below
     //sensorThreshold = myObj.sensorThresholdInEeprom;
 
     //recover thresholds from eeprom into memory
-    for (int i = 0; i < arraySize(myObj.sensorThresholdInEeprom); i++) {
+    for (int i = 0; i < arraySize(myObj.sensorThresholdInEeprom); i++)
+    {
       sensorThreshold[i] = myObj.sensorThresholdInEeprom[i];
     }
 
     //recover calibration settings from eeprom into memory
-    for (int i = 0; i < arraySize(myObj.calibrationInEeprom); i++) {
+    for (int i = 0; i < arraySize(myObj.calibrationInEeprom); i++)
+    {
       calibration[i] = myObj.calibrationInEeprom[i];
     }
 
     Particle.publish(APP_NAME, "DEBUG: read new data from EEPROM", 60, PRIVATE);
-  }
 
+    // update graphs in ubidots
+    publishThresholdsToUbidots();
+  }
 }
 
 /*******************************************************************************
@@ -847,20 +984,24 @@ void readFromEeprom()
                     Remember that each eeprom writing cycle is a precious and finite resource
  * Return         : none
  *******************************************************************************/
-void saveSettings() {
+void saveSettings()
+{
 
   //if no settings were changed, get out of here
-  if (not settingsHaveChanged) {
+  if (not settingsHaveChanged)
+  {
     return;
   }
 
   //if settings have changed, is it time to store them?
-  if (settingsHaveChanged_timer < SAVE_SETTINGS_INTERVAL) {
+  if (settingsHaveChanged_timer < SAVE_SETTINGS_INTERVAL)
+  {
     return;
   }
 
-  //reset timer
+  //reset timer and flag
   settingsHaveChanged_timer = 0;
+  settingsHaveChanged = false;
 
   //store thresholds in the struct type that will be saved in the eeprom
   eepromMemory.version = EEPROM_VERSION;
@@ -870,16 +1011,87 @@ void saveSettings() {
   //eepromMemory.sensorThresholdInEeprom = sensorThreshold;
 
   //store thresholds from memory into eeprom
-  for (int i = 0; i < arraySize(sensorThreshold); i++) {
+  for (int i = 0; i < arraySize(sensorThreshold); i++)
+  {
     eepromMemory.sensorThresholdInEeprom[i] = sensorThreshold[i];
   }
 
   //store calibration settings from memory into eeprom
-  for (int i = 0; i < arraySize(calibration); i++) {
+  for (int i = 0; i < arraySize(calibration); i++)
+  {
     eepromMemory.calibrationInEeprom[i] = calibration[i];
   }
 
   //then save
   EEPROM.put(EEPROM_ADDRESS, eepromMemory);
 
+  // update graphs in ubidots
+  publishThresholdsToUbidots();
+}
+
+/*******************************************************************************
+********************************************************************************
+********************************************************************************
+ CLOUD FUNCTIONS
+********************************************************************************
+********************************************************************************
+*******************************************************************************/
+
+/*******************************************************************************
+ * Function Name  : publishTemperatureToUbidots
+ * Description    : sends the value of the data we want to ubidots
+ * Notes          : WARNING: THIS FUNCTION CAN TAKE A LONG TIME TO EXECUTE (few seconds...)
+ * Return         : none
+ *******************************************************************************/
+void publishTemperatureToUbidots()
+{
+
+  // time to publish data to the cloud?
+  if (cloudPublish_timer < CLOUD_PUBLISH_INTERVAL)
+  {
+    return;
+  }
+
+  // reset timer
+  cloudPublish_timer = 0;
+
+  publishToUbidots("sensor1", userFriendlyTemperature(getCalibratedSensorReading(0)));
+  delay(1100);
+  publishToUbidots("sensor2", userFriendlyTemperature(getCalibratedSensorReading(1)));
+  delay(1100);
+  publishToUbidots("sensor3", userFriendlyTemperature(getCalibratedSensorReading(2)));
+  delay(1100);
+  publishToUbidots("sensor4", userFriendlyTemperature(getCalibratedSensorReading(3)));
+  delay(1100);
+}
+
+/*******************************************************************************
+ * Function Name  : publishThresholdsToUbidots
+ * Description    : sends the value of the data we want to ubidots
+ * Notes          : WARNING: THIS FUNCTION CAN TAKE A LONG TIME TO EXECUTE (few seconds...)
+ * Return         : none
+ *******************************************************************************/
+void publishThresholdsToUbidots()
+{
+
+  publishToUbidots("threshold1", String(sensorThreshold[0]));
+  delay(1100);
+  publishToUbidots("threshold2", String(sensorThreshold[1]));
+  delay(1100);
+  publishToUbidots("threshold3", String(sensorThreshold[2]));
+  delay(1100);
+  publishToUbidots("threshold4", String(sensorThreshold[3]));
+  delay(1100);
+}
+
+/*******************************************************************************
+ * Function Name  : publishToUbidots
+ * Description    : sends the value of the parameter to ubidots
+ * Parameters     : String name: name of the value
+                    String value: value to store in ubidots
+ * Return         : none
+ *******************************************************************************/
+void publishToUbidots(String name, String value)
+{
+  Particle.publish("ubidots", "{\"ubi-dsl-vl\":\"" + Particle.deviceID() + "/" + name + "\", \"ubi-token\":\"" + ubidotsToken + "\", \"ubi-value\":\"" + value + "\"}", 60, PRIVATE);
 }
